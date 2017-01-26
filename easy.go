@@ -66,8 +66,8 @@ import (
 	"fmt"
 	"mime"
 	"path"
-	"reflect"
 	"unsafe"
+	"sync"
 )
 
 type CurlInfo C.CURLINFO
@@ -105,21 +105,56 @@ type CURL struct {
 	progressFunction              *func(float64, float64, float64, float64, interface{}) bool
 	fnmatchFunction               *func(string, string, interface{}) int
 	// callback datas
-	headerData, writeData, readData, progressData, fnmatchData *interface{}
+	headerData, writeData, readData, progressData, fnmatchData interface{}
 	// list of C allocs
 	mallocAllocs []*C.char
+}
+
+// concurrent safe context map
+type contextMap struct {
+	items map[uintptr]*CURL
+	sync.RWMutex
+}
+
+func (c *contextMap) Set(k uintptr, v *CURL) {
+	c.Lock()
+	defer c.Unlock()
+
+	c.items[k] = v
+}
+
+func (c *contextMap) Get(k uintptr) *CURL {
+	c.RLock()
+	defer c.RUnlock()
+
+	return c.items[k]
+}
+
+func (c *contextMap) Delete(k uintptr) {
+	c.Lock()
+	defer c.Unlock()
+
+	delete(c.items, k)
+}
+
+var context_map = &contextMap {
+	items: make(map[uintptr]*CURL),
 }
 
 // curl_easy_init - Start a libcurl easy session
 func EasyInit() *CURL {
 	p := C.curl_easy_init()
-	return &CURL{handle: p, mallocAllocs: make([]*C.char, 0)} // other field defaults to nil
+	c := &CURL{handle: p, mallocAllocs: make([]*C.char, 0)} // other field defaults to nil
+	context_map.Set(uintptr(p), c)
+	return c
 }
 
 // curl_easy_duphandle - Clone a libcurl session handle
 func (curl *CURL) Duphandle() *CURL {
-	p := curl.handle
-	return &CURL{handle: C.curl_easy_duphandle(p)}
+	p := C.curl_easy_duphandle(curl.handle)
+	c := &CURL{handle: p}
+	context_map.Set(uintptr(p), c)
+	return c
 }
 
 // curl_easy_cleanup - End a libcurl easy session
@@ -127,6 +162,7 @@ func (curl *CURL) Cleanup() {
 	p := curl.handle
 	C.curl_easy_cleanup(p)
 	curl.MallocFreeAfter(0)
+	context_map.Delete(uintptr(p))
 }
 
 // curl_easy_setopt - set options for a curl easy handle
@@ -140,16 +176,16 @@ func (curl *CURL) Setopt(opt int, param interface{}) error {
 	switch {
 	// not really set
 	case opt == OPT_READDATA: // OPT_INFILE
-		curl.readData = &param
+		curl.readData = param
 		return nil
 	case opt == OPT_PROGRESSDATA:
-		curl.progressData = &param
+		curl.progressData = param
 		return nil
 	case opt == OPT_HEADERDATA: // also known as OPT_WRITEHEADER
-		curl.headerData = &param
+		curl.headerData = param
 		return nil
 	case opt == OPT_WRITEDATA: // OPT_FILE
-		curl.writeData = &param
+		curl.writeData = param
 		return nil
 
 	case opt == OPT_READFUNCTION:
@@ -158,8 +194,7 @@ func (curl *CURL) Setopt(opt int, param interface{}) error {
 
 		ptr := C.return_read_function()
 		if err := newCurlError(C.curl_easy_setopt_pointer(p, C.CURLoption(opt), ptr)); err == nil {
-			return newCurlError(C.curl_easy_setopt_pointer(p, OPT_READDATA,
-				unsafe.Pointer(reflect.ValueOf(curl).Pointer())))
+			return newCurlError(C.curl_easy_setopt_pointer(p, OPT_READDATA, unsafe.Pointer(curl.handle)))
 		} else {
 			return err
 		}
@@ -170,8 +205,7 @@ func (curl *CURL) Setopt(opt int, param interface{}) error {
 
 		ptr := C.return_progress_function()
 		if err := newCurlError(C.curl_easy_setopt_pointer(p, C.CURLoption(opt), ptr)); err == nil {
-			return newCurlError(C.curl_easy_setopt_pointer(p, OPT_PROGRESSDATA,
-				unsafe.Pointer(reflect.ValueOf(curl).Pointer())))
+			return newCurlError(C.curl_easy_setopt_pointer(p, OPT_PROGRESSDATA, unsafe.Pointer(curl.handle)))
 		} else {
 			return err
 		}
@@ -182,8 +216,7 @@ func (curl *CURL) Setopt(opt int, param interface{}) error {
 
 		ptr := C.return_header_function()
 		if err := newCurlError(C.curl_easy_setopt_pointer(p, C.CURLoption(opt), ptr)); err == nil {
-			return newCurlError(C.curl_easy_setopt_pointer(p, OPT_HEADERDATA,
-				unsafe.Pointer(reflect.ValueOf(curl).Pointer())))
+			return newCurlError(C.curl_easy_setopt_pointer(p, OPT_HEADERDATA, unsafe.Pointer(curl.handle)))
 		} else {
 			return err
 		}
@@ -194,8 +227,7 @@ func (curl *CURL) Setopt(opt int, param interface{}) error {
 
 		ptr := C.return_write_function()
 		if err := newCurlError(C.curl_easy_setopt_pointer(p, C.CURLoption(opt), ptr)); err == nil {
-			return newCurlError(C.curl_easy_setopt_pointer(p, OPT_WRITEDATA,
-				unsafe.Pointer(reflect.ValueOf(curl).Pointer())))
+			return newCurlError(C.curl_easy_setopt_pointer(p, OPT_WRITEDATA, unsafe.Pointer(curl.handle)))
 		} else {
 			return err
 		}
