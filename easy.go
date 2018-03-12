@@ -68,6 +68,7 @@ import (
 	"path"
 	"unsafe"
 	"sync"
+	"errors"
 )
 
 type CurlInfo C.CURLINFO
@@ -341,6 +342,9 @@ func (curl *CURL) Recv(buffer []byte) (int, error) {
 // curl_easy_perform - Perform a file transfer
 func (curl *CURL) Perform() error {
 	p := curl.handle
+	if p == nil {
+		return errors.New("nil")
+	}
 	return newCurlError(C.curl_easy_perform(p))
 }
 
